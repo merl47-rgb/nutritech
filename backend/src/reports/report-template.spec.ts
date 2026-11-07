@@ -118,3 +118,60 @@ describe('Reporte imprimible', () => {
     expect(html).not.toContain('<script>');
   });
 });
+
+describe('Ficha familiar resumida', () => {
+  const family: ReportData = {
+    ...fixture,
+    estado_evaluacion: 'REGISTRADA',
+    fecha_nacimiento: '2024-09-16',
+    sexo: 'F',
+    direccion: 'Casa de prueba <script>alert(1)</script>',
+    comunidad: 'Aldea Sector Méndez, Génova Costa Cuca',
+    responsables: [
+      { nombre: 'Ana Pérez <img>', parentesco: 'MADRE', principal: true },
+    ],
+    peso_referencia: {
+      sexo: 'F',
+      edad_dias: 731,
+      referencia: { mediana_kg: 11.5, menos2_kg: 9.2, mas2_kg: 14.6 },
+      fuente: {
+        titulo: 'OMS',
+        url: 'https://www.who.int/tools/child-growth-standards/standards/weight-for-age',
+      },
+      sha256: 'e'.repeat(64),
+    },
+  };
+  it('muestra nacimiento, responsable, domicilio, medidas y la hora de Guatemala sin códigos en la ficha', () => {
+    const html = reportHtml(family);
+    const cover = html.split('<details class="technical">')[0];
+    expect(cover).toContain('16/09/2024');
+    expect(cover).toContain('17/09/2026 a las 04:00');
+    expect(cover).toContain('Ana Pérez &lt;img&gt;');
+    expect(cover).toContain('Aldea Sector Méndez');
+    expect(cover).toContain('12 kg');
+    expect(cover).toContain('85 cm');
+    expect(cover).toContain('11.50 kg');
+    expect(cover).toContain('9.20 a 14.60 kg');
+    expect(cover).toContain('no es un peso obligatorio');
+    for (const code of [
+      fixture.codigo,
+      fixture.evaluacion,
+      fixture.orientacion,
+      fixture.expediente,
+      fixture.hash_orientacion,
+    ])
+      expect(cover).not.toContain(code);
+    expect(html).toContain(fixture.evaluacion);
+    expect(html).toContain('.technical{display:none!important}');
+    expect(html).not.toContain('<script>');
+    expect(html).not.toContain('<img>');
+  });
+  it('no inventa familiares, direcciones ni peso cuando esos datos faltan', () => {
+    const html = reportHtml({ ...fixture, peso_referencia: null });
+    expect(html).toContain('No se ha vinculado un padre o encargado');
+    expect(html).toContain('Dirección no registrada');
+    expect(html).toContain('Comunidad no registrada');
+    expect(html).toContain('No se pudo verificar una referencia');
+    expect(html).not.toContain('Franja de referencia:');
+  });
+});

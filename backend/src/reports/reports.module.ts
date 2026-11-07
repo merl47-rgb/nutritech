@@ -11,6 +11,7 @@ import {
   Post,
   Query,
   Req,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { IsInt, IsUUID, Matches, Max, Min } from 'class-validator';
 import { Type } from 'class-transformer';
@@ -22,6 +23,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { RequirePermissions } from '../permissions/require-permissions.decorator';
 import type { AuthRequest } from '../auth/auth.types';
 import { reportHtml, type ReportData } from './report-template';
+import { GrowthModule } from '../growth/growth.module';
+import { GrowthService } from '../growth/growth.service';
 class ReportCode {
   @Matches(/^[0-7][0-9A-HJKMNP-TV-Z]{25}$/) codigo!: string;
 }
@@ -35,7 +38,10 @@ class ReportQuery {
 }
 @Injectable()
 export class ReportsService {
-  constructor(private readonly db: PrismaService) {}
+  constructor(
+    private readonly db: PrismaService,
+    private readonly growth: GrowthService = new GrowthService(db),
+  ) {}
   async create(dto: CreateReport, actor: bigint) {
     return this.db.$transaction(
       async (tx) => {
@@ -71,7 +77,19 @@ export class ReportsService {
           include: {
             evaluacion: {
               include: {
-                ninos: true,
+                ninos: {
+                  include: {
+                    comunidades: true,
+                    nino_responsable: {
+                      where: { responsables: { activo: true } },
+                      orderBy: [
+                        { es_principal: 'desc' },
+                        { responsable_id: 'asc' },
+                      ],
+                      include: { responsables: true },
+                    },
+                  },
+                },
                 centros_salud: { select: { nombre: true } },
               },
             },
@@ -108,6 +126,18 @@ export class ReportsService {
         const code = ulid();
         const now = new Date();
         const child = row.evaluacion.ninos;
+        const calculation = JSON.parse(row.contenido) as ReportData['calculo'];
+        // Use the sex and age captured by this calculation, not a later measurement.
+        const sex = calculation.entrada.sexo ?? child.sexo_biologico;
+        let reference: ReportData['peso_referencia'] = null;
+        try {
+          reference = await this.growth.reference(
+            sex,
+            calculation.entrada.edad_dias,
+          );
+        } catch (error) {
+          if (!(error instanceof ServiceUnavailableException)) throw error;
+        }
         const data: ReportData = {
           codigo: code,
           fecha: now.toISOString(),
@@ -121,13 +151,29 @@ export class ReportsService {
             .filter(Boolean)
             .join(' '),
           expediente: child.codigo_expediente,
+          fecha_nacimiento: child.fecha_nacimiento.toISOString().slice(0, 10),
+          sexo: sex,
+          direccion: child.direccion_referencia,
+          comunidad: child.comunidades
+            ? [
+                child.comunidades.nombre,
+                child.comunidades.municipio,
+                child.comunidades.departamento,
+              ].join(', ')
+            : null,
+          responsables: child.nino_responsable.map((link) => ({
+            nombre: `${link.responsables.nombres} ${link.responsables.apellidos}`,
+            parentesco: link.parentesco,
+            principal: link.es_principal,
+          })),
+          peso_referencia: reference,
           evaluacion: dto.evaluacion,
           estado_evaluacion: row.evaluacion.estado,
           centro: row.evaluacion.centros_salud.nombre,
           orientacion: dto.orientacion,
           guardada: row.guardado_en.toISOString(),
           hash_orientacion: row.contenido_sha256,
-          calculo: JSON.parse(row.contenido) as ReportData['calculo'],
+          calculo: calculation,
           valoraciones: row.valoraciones_medicas.map((v) => ({
             autor: v.medico.codigo_acceso,
             fecha: v.registrado_en.toISOString(),
@@ -154,7 +200,7 @@ export class ReportsService {
         await tx.reportes_generados.create({
           data: {
             codigo_publico: code,
-            tipo_reporte: 'EVALUACION_SEGUIMIENTO_V1',
+            tipo_reporte: 'EVALUACION_FAMILIAR_V2',
             nino_id: child.id,
             formato: 'HTML',
             orientacion_id: row.id,
@@ -191,7 +237,11 @@ export class ReportsService {
     );
   }
   async list(query: ReportQuery) {
-    const where = { tipo_reporte: 'EVALUACION_SEGUIMIENTO_V1' };
+    const where = {
+      tipo_reporte: {
+        in: ['EVALUACION_SEGUIMIENTO_V1', 'EVALUACION_FAMILIAR_V2'],
+      },
+    };
     const [total, rows] = await this.db.$transaction([
       this.db.reportes_generados.count({ where }),
       this.db.reportes_generados.findMany({
@@ -203,11 +253,21 @@ export class ReportsService {
           codigo_publico: true,
           generado_en: true,
           formato: true,
+          ninos: {
+            select: {
+              primer_nombre: true,
+              segundo_nombre: true,
+              primer_apellido: true,
+              segundo_apellido: true,
+            },
+          },
           usuarios: { select: { codigo_acceso: true } },
           orientacion: {
             select: {
               codigo_publico: true,
-              evaluacion: { select: { codigo_publico: true } },
+              evaluacion: {
+                select: { codigo_publico: true, evaluado_en: true },
+              },
             },
           },
         },
@@ -271,7 +331,7 @@ class ReportsController {
   }
 }
 @Module({
-  imports: [PrismaModule],
+  imports: [PrismaModule, GrowthModule],
   providers: [ReportsService],
   exports: [ReportsService],
   controllers: [ReportsController],
